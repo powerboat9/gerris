@@ -224,12 +224,30 @@ pub async fn prepare_commits(
 
     info!("created branch `{new_branch}`");
 
-    rev_list.lines().try_for_each(|commit| {
+    // cherry-pick until we hit a commit we can't apply
+    // if we hit such a commit, only error if we haven't applied any commits
+    let mut had_successful_cherry_pick = false;
+    for commit in rev_list.lines() {
         info!("cherry-picking {commit}...");
-        git::cherry_pick(git::Commit(commit)).spawn()?;
 
-        maybe_prefix_cherry_picked_commit()
-    })?;
+        match git::cherry_pick(git::Commit(commit)).spawn() {
+            Err(e_cherry) => {
+                if !had_successful_cherry_pick {
+                    info!("failed on first commit");
+                    return Err(Error::Git(e_cherry))
+                } else if let Err(e_abort) = git::cherry_pick_abort().spawn() {
+                    info!("failed to abort cherry-pick");
+                    return Err(Error::Git(e_abort))
+                } else {
+                    info!("failed, stopping early");
+                    break
+                }
+            }
+            _ => had_successful_cherry_pick = true
+        }
+
+        maybe_prefix_cherry_picked_commit()?;
+    }
 
     info!("pushing branch...");
     git::push()
