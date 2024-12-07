@@ -141,6 +141,61 @@ pub fn maybe_prefix_cherry_picked_commit() -> Result<(), Error> {
     Ok(())
 }
 
+// returns (them_msg, us)
+fn find_last_upstreamed_commit_us() -> Result<(String, String), Error> {
+    let mut branch = git::Branch("gcc/trunk".to_owned());
+
+    loop {
+        let last_upstreamed_commit = git::log()
+            .amount(1)
+            .grep("gccrs: ")
+            .branch(branch)
+            .format(git::Format::Hash)
+            .spawn()?
+            .stdout
+            .trim_end()
+            .to_owned();
+
+        info!("found last upstreamed commit: {}", last_upstreamed_commit);
+
+        let last_msg = match git::log()
+            .amount(1)
+            .branch(git::Branch(last_upstreamed_commit.as_str()))
+            .format(git::Format::Title)
+            .spawn()?
+            .stdout
+            .strip_prefix("gccrs: ") {
+            Some(x) => x.trim_end().to_owned(),
+            None => {
+                info!("invalid matching commit, skipping");
+                branch = git::Branch(last_upstreamed_commit + "~");
+                continue;
+            }
+        };
+
+        info!("commit title: {}", last_msg);
+
+        let last_commit_us = git::log()
+            .amount(1)
+            .grep(last_msg.as_str())
+            .branch(git::Branch("upstream/master"))
+            .grep(last_msg.as_str())
+            .format(git::Format::Hash)
+            .spawn()?
+            .stdout
+            .trim_end()
+            .to_owned();
+
+        if last_commit_us.is_empty() {
+            info!("could not find matching commit, skipping");
+            branch = git::Branch(last_upstreamed_commit + "~");
+        } else {
+            info!("found equivalent commit: {}", last_commit_us);
+            return Ok((last_msg, last_commit_us));
+        }
+    }
+}
+
 fn prepare_body(last_commit: String, rev_list: String) -> String {
     format!(
         "
@@ -176,31 +231,8 @@ pub async fn prepare_commits(
     info!("fetching `gcc`...");
     git::fetch().remote("gcc").spawn()?;
 
-    let last_upstreamed_commit = git::log()
-        .amount(1)
-        .grep("gccrs: ")
-        .branch(git::Branch("gcc/trunk"))
-        .format(git::Format::Title)
-        .spawn()?
-        .stdout;
-
-    info!("found last upstreamed commit: {}", last_upstreamed_commit);
-
-    let last_msg = last_upstreamed_commit
-        .strip_prefix("gccrs: ")
-        .unwrap()
-        .trim_end();
-
-    let last_commit_us = git::log()
-        .amount(1)
-        .grep(last_msg)
-        .branch(git::Branch("upstream/master"))
-        .grep(last_msg)
-        .format(git::Format::Hash)
-        .spawn()?
-        .stdout;
-
-    info!("found equivalent commit: {}", last_commit_us);
+    let (last_upstreamed_commit, last_commit_us)
+      = find_last_upstreamed_commit_us()?;
 
     let rev_list = git::rev_list(last_commit_us, "upstream/master")
         .no_merges()
